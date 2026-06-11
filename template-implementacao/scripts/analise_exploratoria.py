@@ -16,8 +16,9 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from collections import Counter
 import re
+from collections import Counter
+from nltk.util import ngrams
 
 
 # ==========================================================
@@ -36,28 +37,6 @@ def informacoes_gerais(df):
 
     print("\nValores nulos:")
     print(df.isnull().sum())
-
-
-# ==========================================================
-# MEDIDAS DESCRITIVAS
-# ==========================================================
-
-def medidas_descritivas(df):
-
-    df["word_count"] = df["Body"].astype(str).apply(
-        lambda texto: len(texto.split())
-    )
-
-    print("\n" + "=" * 70)
-    print("MEDIDAS DESCRITIVAS")
-    print("=" * 70)
-
-    print("\nEstatisticas do tamanho dos documentos:")
-    print(df["word_count"].describe())
-
-    print(f"\nMenor documento: {df['word_count'].min()} palavras")
-    print(f"Maior documento: {df['word_count'].max()} palavras")
-    print(f"Media de palavras por documento: {df['word_count'].mean():.2f}")
 
 
 # ==========================================================
@@ -83,6 +62,138 @@ def distribuicao_classes(df):
             2
         )
     )
+
+
+# ==========================================================
+# DOCUMENTOS DUPLICADOS
+# ==========================================================
+
+def analisar_duplicados(df):
+
+    duplicados = df["Body"].duplicated().sum()
+
+    print("\n" + "=" * 70)
+    print("DOCUMENTOS DUPLICADOS")
+    print("=" * 70)
+
+    print(f"Quantidade de duplicados: {duplicados}")
+
+    print(
+        f"Percentual: "
+        f"{100 * duplicados / len(df):.2f}%"
+    )
+
+
+# ==========================================================
+# PROBLEMAS DE CODIFICACAO
+# ==========================================================
+
+def problemas_codificacao(df):
+
+    padroes = [
+        "Ã",
+        "Â",
+        "¤",
+        "¢"
+    ]
+
+    quantidade = 0
+
+    for texto in df["Body"].astype(str):
+
+        if any(
+            p in texto
+            for p in padroes
+        ):
+            quantidade += 1
+
+    print("\n" + "=" * 70)
+    print("PROBLEMAS DE CODIFICACAO")
+    print("=" * 70)
+
+    print(
+        f"Documentos afetados: "
+        f"{quantidade}"
+    )
+
+    print(
+        f"Percentual: "
+        f"{100 * quantidade / len(df):.2f}%"
+    )
+
+
+# ==========================================================
+# MEDIDAS DESCRITIVAS
+# ==========================================================
+
+def medidas_descritivas(df):
+
+    df["word_count"] = df["Body"].astype(str).apply(
+        lambda texto: len(texto.split())
+    )
+
+    print("\n" + "=" * 70)
+    print("MEDIDAS DESCRITIVAS")
+    print("=" * 70)
+
+    print("\nEstatisticas do tamanho dos documentos:")
+    print(df["word_count"].describe())
+
+    print(f"\nMenor documento: {df['word_count'].min()} palavras")
+    print(f"Maior documento: {df['word_count'].max()} palavras")
+    print(f"Media de palavras por documento: {df['word_count'].mean():.2f}")
+
+
+# ==========================================================
+# TAMANHO DOS DOCUMENTOS POR CLASSE
+# ==========================================================
+
+def tamanho_por_categoria(df):
+
+    if "word_count" not in df.columns:
+
+        df["word_count"] = (
+            df["Body"]
+            .astype(str)
+            .apply(lambda x: len(x.split()))
+        )
+
+    print("\n" + "=" * 70)
+    print("TAMANHO DOS DOCUMENTOS POR CLASSE")
+    print("=" * 70)
+
+    print(
+        df.groupby("Category")["word_count"]
+        .agg([
+            "count",
+            "mean",
+            "median",
+            "min",
+            "max",
+            "std"
+        ])
+    )
+
+
+# ==========================================================
+# REFERENCIAS LEGISLATIVAS
+# ==========================================================
+
+def analisar_referencias_legais(df):
+
+    padrao = r"(ARTIGO_\d+|LEI_\d+|DECRETO_\d+)"
+
+    referencias = (
+        df["Body"]
+        .astype(str)
+        .str.count(padrao)
+    )
+
+    print("\n" + "=" * 70)
+    print("REFERENCIAS LEGISLATIVAS")
+    print("=" * 70)
+
+    print(referencias.describe())
 
 
 # ==========================================================
@@ -159,6 +270,132 @@ def analise_lexical(df):
         print(f"{palavra}: {freq}")
 
     return common_words
+
+
+# ==========================================================
+# DIVERSIDADE LEXICAL POR CLASSE
+# ==========================================================
+
+def diversidade_por_categoria(df):
+
+    print("\n" + "=" * 70)
+    print("DIVERSIDADE LEXICAL POR CLASSE")
+    print("=" * 70)
+
+    for categoria in sorted(
+        df["Category"].unique()
+    ):
+
+        textos = df[
+            df["Category"] == categoria
+        ]["Body"]
+
+        palavras = []
+
+        for texto in textos:
+
+            palavras.extend(
+                tokenize(
+                    fix_mojibake(str(texto))
+                )
+            )
+
+        vocabulario = len(
+            set(palavras)
+        )
+
+        diversidade = (
+            vocabulario / len(palavras)
+            if len(palavras) > 0
+            else 0
+        )
+
+        print(
+            f"Classe {categoria}: "
+            f"{diversidade:.4f}"
+        )
+
+
+# ==========================================================
+# PALAVRAS MAIS FREQUENTES POR CLASSE
+# ==========================================================
+
+def palavras_por_categoria(df):
+
+    print("\n" + "=" * 70)
+    print("PALAVRAS MAIS FREQUENTES POR CLASSE")
+    print("=" * 70)
+
+    for categoria in sorted(
+        df["Category"].unique()
+    ):
+
+        textos = df[
+            df["Category"] == categoria
+        ]["Body"]
+
+        palavras = []
+
+        for texto in textos:
+
+            palavras.extend(
+                tokenize(
+                    fix_mojibake(str(texto))
+                )
+            )
+
+        top = Counter(
+            palavras
+        ).most_common(10)
+
+        print(
+            f"\nClasse {categoria}"
+        )
+
+        for palavra, freq in top:
+
+            print(
+                f"{palavra}: {freq}"
+            )
+
+
+# ==========================================================
+# BIGRAMAS FREQUENTES
+# ==========================================================
+
+def bigramas_frequentes(df):
+
+    palavras = []
+
+    sample_texts = df["Body"].sample(
+        min(5000, len(df)),
+        random_state=42
+    )
+
+    for texto in sample_texts:
+
+        palavras.extend(
+            tokenize(
+                fix_mojibake(str(texto))
+            )
+        )
+
+    top_bigramas = Counter(
+        ngrams(
+            palavras,
+            2
+        )
+    ).most_common(15)
+
+    print("\n" + "=" * 70)
+    print("TOP 15 BIGRAMAS")
+    print("=" * 70)
+
+    for bg, freq in top_bigramas:
+
+        print(
+            f"{bg[0]} {bg[1]}: {freq}"
+        )
 
 
 # ==========================================================
@@ -259,7 +496,46 @@ def histograma_tamanho_textos(df):
 
 
 # ==========================================================
-# GRAFICO 4 - PALAVRAS FREQUENTES
+# GRAFICO 4 - REFERENCIAS LEGISLATIVAS
+# ==========================================================
+
+def grafico_referencias_legais(df):
+
+    padrao = r"(ARTIGO_\d+|LEI_\d+|DECRETO_\d+)"
+
+    refs = (
+        df["Body"]
+        .astype(str)
+        .str.count(padrao)
+    )
+
+    plt.figure(figsize=(10, 5))
+
+    sns.histplot(
+        refs,
+        bins=40,
+        kde=True
+    )
+
+    plt.title(
+        "Quantidade de Referencias Legislativas"
+    )
+
+    plt.xlabel(
+        "Numero de referencias"
+    )
+
+    plt.ylabel(
+        "Frequencia"
+    )
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+# ==========================================================
+# GRAFICO 5 - PALAVRAS FREQUENTES
 # ==========================================================
 
 def palavras_frequentes(common_words):
