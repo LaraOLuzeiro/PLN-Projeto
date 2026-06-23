@@ -1,0 +1,3 @@
+[spacy_models]
+pt_pipeline = pt_pipeline
+
