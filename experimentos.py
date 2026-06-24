@@ -536,80 +536,6 @@ def extrair_mencoes_legais_amostra(
     }
 
 
-def extrair_features_linguisticas_modelo(
-    df: pd.DataFrame,
-    nlp,
-    coluna: str = "Body",
-    limite_chars: int = 5000,
-) -> pd.DataFrame:
-    """
-    Extrai features alinhadas por documento para modelagem supervisionada.
-
-    Reutiliza as funcoes de NER e POS do modulo de pre-processamento para
-    gerar, em cada linha, atributos linguisticos complementares ao TF-IDF.
-    """
-    try:
-        from preprocessamento import (
-            aplicar_pos_tagging as _aplicar_pos_tagging,
-            extrair_entidades_nomeadas as _extrair_entidades_nomeadas,
-            extrair_mencoes_legais as _extrair_mencoes_legais,
-            limpar_ruido_ocr as _limpar_ruido_ocr,
-        )
-    except ImportError:
-        # Fallback para execucao quando scripts/ e o diretorio atual.
-        from preprocessamento import (  # type: ignore
-            aplicar_pos_tagging as _aplicar_pos_tagging,
-            extrair_entidades_nomeadas as _extrair_entidades_nomeadas,
-            extrair_mencoes_legais as _extrair_mencoes_legais,
-            limpar_ruido_ocr as _limpar_ruido_ocr,
-        )
-
-    if coluna not in df.columns:
-        raise ValueError(f"Coluna '{coluna}' nao encontrada no DataFrame.")
-
-    registros = []
-    textos = df[coluna].fillna("").astype(str).tolist()
-
-    for texto in textos:
-        texto_limpo = _limpar_ruido_ocr(texto)[:limite_chars]
-
-        entidades = _extrair_entidades_nomeadas(texto_limpo, nlp=nlp)
-        contagem_entidades: dict[str, int] = {}
-        for ent in entidades:
-            tipo = ent.get("tipo", "")
-            contagem_entidades[tipo] = contagem_entidades.get(tipo, 0) + 1
-
-        mencoes = _extrair_mencoes_legais(texto_limpo, nlp=None)
-        mencoes_legais = mencoes.get("mencoes_legais_regex", [])
-
-        pares_pos = _aplicar_pos_tagging(texto_limpo, nlp=nlp)
-        contagem_pos: dict[str, int] = {}
-        for _, pos, _ in pares_pos:
-            contagem_pos[pos] = contagem_pos.get(pos, 0) + 1
-
-        total_entidades = len(entidades)
-        total_entidades_base = max(total_entidades, 1)
-        total_pos = max(len(pares_pos), 1)
-
-        registros.append({
-            "ner_n_entidades": total_entidades,
-            "ner_ent_por_100_tokens": 100 * total_entidades / total_pos,
-            "ner_n_mencoes_legais": len(mencoes_legais),
-            "ner_tem_mencao_legal": int(len(mencoes_legais) > 0),
-            "ner_prop_PER": contagem_entidades.get("PER", 0) / total_entidades_base,
-            "ner_prop_ORG": contagem_entidades.get("ORG", 0) / total_entidades_base,
-            "ner_prop_LOC": contagem_entidades.get("LOC", 0) / total_entidades_base,
-            "ner_prop_MISC": contagem_entidades.get("MISC", 0) / total_entidades_base,
-            "pos_prop_NOUN": contagem_pos.get("NOUN", 0) / total_pos,
-            "pos_prop_VERB": contagem_pos.get("VERB", 0) / total_pos,
-            "pos_prop_ADJ": contagem_pos.get("ADJ", 0) / total_pos,
-            "pos_prop_PROPN": contagem_pos.get("PROPN", 0) / total_pos,
-            "pos_prop_NUM": contagem_pos.get("NUM", 0) / total_pos,
-            "pos_prop_ADV": contagem_pos.get("ADV", 0) / total_pos,
-        })
-
-    return pd.DataFrame(registros).fillna(0.0)
-
 # ==============================================================
 # MODELO PROFUNDO - BiLSTM COM ATENCAO
 # ==============================================================
@@ -1204,7 +1130,6 @@ __all__ = [
     "executar_baselines_classicos",
     "aplicar_ner_juridico",
     "extrair_mencoes_legais_amostra",
-    "extrair_features_linguisticas_modelo",
     "TokenizadorBiLSTM",
     "construir_vocabulario",
     "codificar_texto",

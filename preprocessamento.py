@@ -609,81 +609,85 @@ def extrair_mencoes_legais(
 
 
 # ==============================================================
-# FEATURES PLN (para analise e engenharia de atributos)
+# FEATURES 
 # ==============================================================
 
-def extrair_features_pos(
+def extrair_features_linguisticas(
     df: pd.DataFrame,
     nlp,
     coluna: str = "texto_preprocessado",
-    amostra: int = 3000,
+    amostra: int | None = None,
+    limite_chars: int = 5000,
+    random_state: int = 42
 ) -> pd.DataFrame:
     """
-    Extrai proporcoes de tags POS como features numericas por documento.
-    Util para analise das diferencas gramaticais entre classes e para
-    engenharia de atributos em modelos classicos.
-    Colunas resultantes: Category, prop_NOUN, prop_VERB, prop_ADJ, prop_PROPN, prop_NUM, prop_ADV.
+    Unifica a extração de features de POS Tagging, NER e referências legais.
+    Pode ser aplicada ao conjunto completo ou a uma amostragem restrita.
     """
-    df_amostra = df[df["Category"] >= 0].sample(
-        min(amostra, len(df)), random_state=42
-    )
+    # Define se operará em uma amostra reduzida ou no DataFrame completo
+    if amostra is not None and amostra < len(df):
+        if "Category" in df.columns and (df["Category"] >= 0).any():
+            df_analise = df[df["Category"] >= 0].sample(amostra, random_state=random_state).copy()
+        else:
+            df_analise = df.sample(amostra, random_state=random_state).copy()
+    else:
+        df_analise = df.copy()
 
     registros = []
-    for _, row in df_amostra.iterrows():
-        pares = aplicar_pos_tagging(str(row[coluna])[:5000], nlp=nlp)
-        contagem: dict[str, int] = {}
-        for _, pos, _ in pares:
-            contagem[pos] = contagem.get(pos, 0) + 1
-        total = max(len(pares), 1)
-        registros.append({
-            "Category": row["Category"],
-            "prop_NOUN": contagem.get("NOUN", 0) / total,
-            "prop_VERB": contagem.get("VERB", 0) / total,
-            "prop_ADJ": contagem.get("ADJ", 0) / total,
-            "prop_PROPN": contagem.get("PROPN", 0) / total,
-            "prop_NUM": contagem.get("NUM", 0) / total,
-            "prop_ADV": contagem.get("ADV", 0) / total,
-        })
+    for _, row in df_analise.iterrows():
+        texto_limpo = str(row[coluna])[:limite_chars]
 
-    return pd.DataFrame(registros)
+        # 1. POS Tagging
+        pares_pos = aplicar_pos_tagging(texto_limpo, nlp=nlp)
+        contagem_pos = {}
+        for _, pos, _ in pares_pos:
+            contagem_pos[pos] = contagem_pos.get(pos, 0) + 1
+        total_pos = max(len(pares_pos), 1)
 
-
-def extrair_features_ner(
-    df: pd.DataFrame,
-    nlp,
-    coluna: str = "texto_preprocessado",
-    amostra: int = 1000,
-) -> pd.DataFrame:
-    """
-    Extrai contagens e proporcoes de tipos de entidades NER como features.
-    Entidades tipicas no dominio juridico:
-    - ORG: organizacoes
-    - PER: pessoas
-    - LOC: localidades
-    - MISC: entidades diversas
-    """
-    df_amostra = df[df["Category"] >= 0].sample(
-        min(amostra, len(df)), random_state=42
-    )
-
-    registros = []
-    for _, row in df_amostra.iterrows():
-        ents = extrair_entidades_nomeadas(str(row[coluna])[:5000], nlp=nlp)
-        contagem: dict[str, int] = {}
+        # 2. NER com spaCy
+        ents = extrair_entidades_nomeadas(texto_limpo, nlp=nlp)
+        contagem_ner = {}
         for ent in ents:
-            contagem[ent["tipo"]] = contagem.get(ent["tipo"], 0) + 1
-            
-        total = max(len(ents), 1)
+            contagem_ner[ent["tipo"]] = contagem_ner.get(ent["tipo"], 0) + 1
+        total_ner = max(len(ents), 1)
+
+        # 3. Menções Legais via Regex
+        mencoes = extrair_mencoes_legais(texto_limpo, nlp=None)
+        mencoes_legais = mencoes.get("mencoes_legais_regex", [])
+
         registros.append({
-            "Category": row["Category"],
-            "n_entidades": len(ents),
-            "prop_PER": contagem.get("PER", 0) / total,
-            "prop_ORG": contagem.get("ORG", 0) / total,
-            "prop_LOC": contagem.get("LOC", 0) / total,
-            "prop_MISC": contagem.get("MISC", 0) / total,
+            "Category": row.get("Category", -1),
+            # Atributos extraídos de NER e Regex
+            "ner_n_entidades": len(ents),
+            "ner_ent_por_100_tokens": 100 * len(ents) / total_pos,
+            "ner_n_mencoes_legais": len(mencoes_legais),
+            "ner_tem_mencao_legal": int(len(mencoes_legais) > 0),
+            "ner_prop_PER": contagem_ner.get("PER", 0) / total_ner,
+            "ner_prop_ORG": contagem_ner.get("ORG", 0) / total_ner,
+            "ner_prop_LOC": contagem_ner.get("LOC", 0) / total_ner,
+            "ner_prop_MISC": contagem_ner.get("MISC", 0) / total_ner,
+            # Atributos de POS (mantendo formato 'prop_' para o gráfico)
+            "prop_NOUN": contagem_pos.get("NOUN", 0) / total_pos,
+            "prop_VERB": contagem_pos.get("VERB", 0) / total_pos,
+            "prop_ADJ": contagem_pos.get("ADJ", 0) / total_pos,
+            "prop_PROPN": contagem_pos.get("PROPN", 0) / total_pos,
+            "prop_NUM": contagem_pos.get("NUM", 0) / total_pos,
+            "prop_ADV": contagem_pos.get("ADV", 0) / total_pos,
         })
 
-    return pd.DataFrame(registros)
+    df_features = pd.DataFrame(registros)
+    
+    # Se for uma amostragem para análise visual, retorna apenas a estrutura com as features
+    if amostra is not None:
+        return df_features
+        
+    # Para o dataset completo, acopla as novas colunas ao DataFrame original
+    df_resultado = pd.concat([
+        df.reset_index(drop=True), 
+        df_features.drop(columns=["Category"], errors="ignore").reset_index(drop=True)
+    ], axis=1)
+    
+    return df_resultado
 
 
 def plotar_distribuicao_pos(
@@ -733,8 +737,7 @@ __all__ = [
     "aplicar_pos_tagging",
     "extrair_entidades_nomeadas",
     "extrair_mencoes_legais",
-    "extrair_features_pos",
-    "extrair_features_ner",
+    "extrair_features_linguisticas",
     "plotar_distribuicao_pos",
     "remover_documentos_duplicados",
     "remover_textos_vazios",
