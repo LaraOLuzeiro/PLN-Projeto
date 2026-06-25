@@ -7,8 +7,8 @@
 # Prof. Tiago A. Almeida
 #
 #
-# Nome:
-# RA:
+# Nome: Daniella Yuka Hirosue, Lara Oliveira Luzeiro, Renan Yugo Ueda
+# RA: 813008, 813259, 813346
 # ################################################################
 
 from __future__ import annotations
@@ -622,30 +622,3 @@ def analisar_vocabulario(
         print(f"  {palavra:<30} {freq:>8,}")
 
     return vocab_global
-
-
-
-__all__ = [
-    "MAPEAMENTO_CLASSES",
-    "STOPWORDS_BASICAS",
-    "resolver_caminho_arquivo",
-    "carregar_csv",
-    "carregar_dados",
-    "obter_mapeamento_classes",
-    "filtrar_rotulos_validos",
-    "exibir_info_geral",
-    "calcular_distribuicao_classes",
-    "plotar_distribuicao_classes",
-    "extrair_texto_bruto",
-    "contar_tokens",
-    "calcular_estatisticas_tamanho_textos",
-    "calcular_estatisticas_tamanho_por_classe",
-    "plotar_comprimento_textos",
-    "calcular_palavras_frequentes_por_classe",
-    "converter_para_dict_frequencias",
-    "plotar_palavras_frequentes",
-    "plotar_nuvem_palavras",
-    "analisar_vocabulario",
-    "analisar_duplicados", 
-    "problemas_codificacao",
-]

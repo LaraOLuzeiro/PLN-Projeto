@@ -7,8 +7,8 @@
 # Prof. Tiago A. Almeida
 #
 #
-# Nome:
-# RA:
+# Nome: Daniella Yuka Hirosue, Lara Oliveira Luzeiro, Renan Yugo Ueda
+# RA: 813008, 813259, 813346
 # ################################################################
 
 """
@@ -70,6 +70,7 @@ try:
         EarlyStoppingCallback,
         Trainer,
         TrainingArguments,
+        get_linear_schedule_with_warmup,
     )
     _TRANSFORMERS_OK = True
 except ImportError:
@@ -536,49 +537,7 @@ def extrair_mencoes_legais_amostra(
     }
 
 
-# ==============================================================
-# MODELO PROFUNDO - BiLSTM COM ATENCAO
-# ==============================================================
-
-class TokenizadorBiLSTM:
-    """
-    Tokenizador simples para o BiLSTM:
-    constroi um vocabulario a partir do corpus e codifica sequencias como IDs.
-    Tokens ausentes recebem o indice <UNK> = 1.
-    """
-
-    def __init__(self, max_vocab: int = 30000, max_len: int = 300) -> None:
-        self.max_vocab = max_vocab
-        self.max_len = max_len
-        self.vocab: dict[str, int] = {"<PAD>": 0, "<UNK>": 1}
-
-    def construir_vocabulario(self, corpus: list[list[str]]) -> None:
-        """Constroi vocabulario a partir de lista de listas de tokens."""
-        contador: Counter = Counter()
-        for tokens in corpus:
-            for token in tokens:
-                contador[token] += 1
-        for palavra, _ in contador.most_common(self.max_vocab - 2):
-            if palavra not in self.vocab:
-                self.vocab[palavra] = len(self.vocab)
-        print(f"  Vocabulario BiLSTM: {len(self.vocab):,} tokens (max_vocab={self.max_vocab})")
-
-    def codificar(self, tokens: list[str]) -> list[int]:
-        """Codifica lista de tokens em sequencia de IDs com padding e truncamento."""
-        ids = []
-        for token in tokens[: self.max_len]:
-            ids.append(self.vocab.get(token, 1))  # 1 = <UNK>
-        while len(ids) < self.max_len:
-            ids.append(0)  # 0 = <PAD>
-        return ids
-
-    def codificar_batch(self, lista_tokens: list[list[str]]) -> list[list[int]]:
-        """Codifica batch de listas de tokens em batch de IDs."""
-        resultado = []
-        for tokens in lista_tokens:
-            resultado.append(self.codificar(tokens))
-        return resultado
-
+# ==========================  FUNÇÕES PARA BiLSTM e BERT ==========================
 
 def construir_vocabulario(
     textos: Iterable[str],
@@ -626,7 +585,6 @@ if _TORCH_OK:
 
     class DatasetSequencias(Dataset):
         """Dataset PyTorch para sequencias de texto com ou sem rotulos."""
-
         def __init__(
             self,
             textos: Iterable[str],
@@ -650,496 +608,588 @@ if _TORCH_OK:
             if self.rotulos is not None:
                 item["labels"] = torch.tensor(self.rotulos[indice], dtype=torch.long)
             return item
+else:
+    # Stubs para quando PyTorch nao esta instalado
+    class DatasetSequencias:  # type: ignore
+        pass
 
-    class BiLSTMAtencao(nn.Module):
+try:
+    import ftfy
+    _FTFY_OK = True
+except ImportError:
+    _FTFY_OK = False
+    print("Erro ao importar módulo ftfy")
+
+
+def limpar_texto_bilstm_bert(texto: str) -> str:
+    """
+    Limpeza higienica minimalista focada em Redes Neurais.
+    Não remove stopwords, não lematiza e mantém a pontução e acentos.
+    Isso porque BiLSTM e BERT não precisam desses tipos de pre-processamento.
+    """    
+
+    # Tratamento de nulos e conversão para string
+    if pd.isna(texto):
+        return ""
+    texto = str(texto).strip()
+
+    # Remocao do wrapper JSON ('{"conteudo"}')
+    if texto.startswith("{") and texto.endswith("}"):
+        texto = texto[1:-1]
+    texto = texto.strip('"')
+
+    # Correção de double-encoding (ex: 'ÃƒÂ£' -> 'a~')
+    if _FTFY_OK:
+        texto = ftfy.fix_text(texto)
+
+    # Remoção de carimbos eletrônicos
+    padrao_assinatura = re.compile(r"Este documento foi assinado digitalmente por[^\.]+\.", flags=re.IGNORECASE)
+    texto = padrao_assinatura.sub(" ", texto)
+
+    # Remoção de números de processos
+    padrao_processo = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4}\b")
+    texto = padrao_processo.sub(" NUM_PROCESSO ", texto)
+
+    # Normalização de Espaços (transforma multiplos espacos/quebras em um so)
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto.strip()
+
+
+def fatiar_head_tail(texto: str, max_tokens: int = 500, tokens_head: int = 120) -> str:
+    """
+    Fatia o texto preservando o começo (relatório) e o final (decisão).
+    Descarta infos (citaçoes de jurisprudencia) que confundem a rede.
+    """
+    # Quebra o texto em uma lista de palavras usando os espacos em branco
+    tokens = texto.split()
+    
+    # Se o texto for menor que o limite, nao precisa cortar nada
+    if len(tokens) <= max_tokens:
+        return texto
+        
+    # Calcula quantos tokens vao ficar no final (Tail)
+    tokens_tail = max_tokens - tokens_head
+    
+    # Fatiamento (Slicing) de listas no Python
+    head = tokens[:tokens_head]
+    tail = tokens[-tokens_tail:]
+    
+    # Cola as duas partes de volta, inserindo um marcador no meio
+    tokens_fatiados = head + ["...[MIOLO_CORTADO]..."] + tail
+    
+    return " ".join(tokens_fatiados)
+
+
+
+def preparar_dados_treino_bilstm_bert(df: pd.DataFrame, coluna_texto: str = "Body", coluna_alvo: str = "Category") -> pd.DataFrame:
+    """
+    Funcao orquestradora: remove classes invalidas e aplica o pipeline de DL.
+    """
+
+    qtd_missings_removidos = 0
+    qtd_duplicatas_removidos = 0
+
+    # Filtra a classe -1
+    df_valido = df[df[coluna_alvo] != -1].copy()
+    qtd_missings_removidos = len(df[df[coluna_alvo]==-1])
+
+    # Remove duplicatas
+    qtd_duplicatas_removidos = df_valido.duplicated(subset=[coluna_texto]).sum()
+    df_valido = df_valido.drop_duplicates(subset=[coluna_texto], keep='first')
+
+    # Reseta o indice do DataFrame apos o filtro
+    df_valido = df_valido.reset_index(drop=True)
+    
+    # Aplica a limpeza higienica
+    df_valido["texto_limpo"] = df_valido[coluna_texto].apply(limpar_texto_bilstm_bert)
+    
+    # Aplica o fatiamento Head + Tail
+    df_valido["texto_limpo"] = df_valido["texto_limpo"].apply(lambda x: fatiar_head_tail(x, max_tokens=500, tokens_head=120))
+    
+    print(f"Missings (-1) removidos: {qtd_missings_removidos}")
+    print(f"Duplicadas removidas pós remoção de missings: {qtd_duplicatas_removidos}")
+
+    return df_valido
+
+
+def preparar_dados_teste_bilstm_bert(df_teste: pd.DataFrame, coluna_texto: str = "Body") -> pd.DataFrame:
+    """
+    Função EXCLUSIVA PARA O TESTE.
+    Aplica a mesma limpeza, mas não remove as duplicatas.
+    """
+    df_processado = df_teste.copy()
+    
+    # Aplica exatamente a mesma limpeza higienica do treino
+    df_processado["texto_limpo"] = df_processado[coluna_texto].apply(limpar_texto_bilstm_bert)
+    
+    # Aplica exatamente o mesmo fatiamento Head + Tail do treino
+    df_processado["texto_limpo"] = df_processado["texto_limpo"].apply(lambda x: fatiar_head_tail(x, max_tokens=500, tokens_head=120))
+    
+    return df_processado
+
+
+def extrair_nao_rotulados_limpos(df_bruto: pd.DataFrame, coluna_texto: str = "Body", coluna_alvo: str = "Category") -> list[str]:
+    """
+    Filtra estritamente as peticoes sem rotulo (-1) do CSV original e aplica a limpeza básica.
+    """
+    df_nr = df_bruto[df_bruto[coluna_alvo] == -1].copy()
+    return df_nr[coluna_texto].apply(limpar_texto_bilstm_bert).tolist()
+
+
+def gerar_matriz_embedding_interna(
+    textos_treino: list[str], 
+    vocabulario: dict[str, int], 
+    dimensao: int = 128,
+    textos_extras_w2v: list[str] | None = None
+) -> torch.Tensor:
+    """
+    Treina o Word2Vec somando o treino oficial com textos extras (ex: a classe -1) e monta a matriz PyTorch.
+    """
+    if not _GENSIM_OK:
+        raise ImportError("Gensim nao instalado. Execute: pip install gensim")
+    from gensim.models import Word2Vec as GensimWord2Vec
+
+    # Junta a lista de textos do treino com a lista de textos -1
+    textos_unificados = list(textos_treino)
+    if textos_extras_w2v is not None:
+        textos_unificados.extend(textos_extras_w2v)
+        
+    print(f"  [Word2Vec Interno] Treinando semantica com {len(textos_unificados):,} textos totais (Treino + Nao Rotulados)...")
+    
+    # Converte a lista de textos numa lista de listas de palavras
+    sentencas = [str(t).split() for t in textos_unificados]
+    
+    modelo_w2v = GensimWord2Vec(
+        sentences=sentencas, vector_size=dimensao, window=5, min_count=1, workers=4, epochs=15, seed=42
+    )
+    
+    # Monta a matriz base do PyTorch com pequenos valores aleatorios
+    matriz_pesos = np.random.normal(scale=0.5, size=(len(vocabulario), dimensao)).astype(np.float32)
+    matriz_pesos[0] = np.zeros(dimensao, dtype=np.float32) # O <PAD> (indice 0) fica zerado
+    
+    palavras_mapeadas = 0
+    for palavra, indice in vocabulario.items():
+        if palavra in modelo_w2v.wv:
+            matriz_pesos[indice] = modelo_w2v.wv[palavra]
+            palavras_mapeadas += 1
+            
+    print(f"  [Word2Vec Interno] Matriz pronta: {palavras_mapeadas:,} / {len(vocabulario):,} palavras mapeadas.")
+    return torch.tensor(matriz_pesos)
+
+
+if _TORCH_OK:
+    class BiLSTMAtencaoNativa(nn.Module):
         """
-        BiLSTM com mecanismo de atencao para classificacao de texto.
-
-        Arquitetura:
-          Embedding -> Dropout -> BiLSTM (2 camadas) -> Atencao -> Linear
-
-        - Bidirecional: processa cada token com contexto anterior e posterior.
-        - Atencao: foca nos tokens mais discriminativos de cada documento,
-          util para textos juridicos longos com informacao distribuida.
-        - 2 camadas: maior capacidade de representacao hierarquica.
-        - Dropout: regularizacao para evitar overfitting.
+        Rede Profunda: Matriz Word2Vec (Injetada) -> BiLSTM (2 Camadas) -> Atencao -> Saida
         """
-
         def __init__(
             self,
-            tamanho_vocabulario: int,
-            dimensao_embedding: int = 128,
+            matriz_pesos: torch.Tensor,
             dimensao_oculta: int = 256,
             quantidade_classes: int = 5,
             dropout: float = 0.4,
-            n_camadas: int = 2,
+            n_camadas: int = 2
         ) -> None:
             super().__init__()
-            self.embedding = nn.Embedding(
-                tamanho_vocabulario, dimensao_embedding, padding_idx=0
-            )
+            
+            self.embedding = nn.Embedding.from_pretrained(matriz_pesos, freeze=False, padding_idx=0)
+            dim_embedding = matriz_pesos.shape[1]
+            
             self.bilstm = nn.LSTM(
-                input_size=dimensao_embedding,
+                input_size=dim_embedding,
                 hidden_size=dimensao_oculta,
                 num_layers=n_camadas,
                 batch_first=True,
                 bidirectional=True,
                 dropout=dropout if n_camadas > 1 else 0.0,
             )
+            
             self.atencao = nn.Linear(dimensao_oculta * 2, 1)
             self.dropout = nn.Dropout(dropout)
             self.classificador = nn.Linear(dimensao_oculta * 2, quantidade_classes)
 
         def forward(self, input_ids):
-            emb = self.dropout(self.embedding(input_ids))       # (B, T, E)
-            lstm_out, _ = self.bilstm(emb)                      # (B, T, 2H)
-            pesos = torch.softmax(self.atencao(lstm_out), dim=1)  # (B, T, 1)
-            contexto = (lstm_out * pesos).sum(dim=1)             # (B, 2H)
-            return self.classificador(self.dropout(contexto))    # (B, C)
-
-else:
-    # Stubs para quando PyTorch nao esta instalado
-    class DatasetSequencias:  # type: ignore
-        pass
-
-    class BiLSTMAtencao:  # type: ignore
-        pass
+            emb = self.dropout(self.embedding(input_ids))
+            lstm_out, _ = self.bilstm(emb)
+            
+            pesos_atencao = torch.softmax(self.atencao(lstm_out), dim=1)
+            representacao_doc = (lstm_out * pesos_atencao).sum(dim=1)
+            
+            return self.classificador(self.dropout(representacao_doc))
 
 
-def treinar_bilstm(
-    textos_treino: Iterable[str],
-    y_treino,
-    textos_validacao: Iterable[str],
-    y_validacao,
-    max_vocabulario: int = 30000,
-    comprimento_max: int = 300,
-    epocas: int = 10,
-    tamanho_lote: int = 64,
-    taxa_aprendizagem: float = 1e-3,
-    dropout: float = 0.4,
+def treinar_bilstm_autossuficiente(
+    textos_treino: list[str],
+    y_treino: np.ndarray,
+    textos_val: list[str],
+    y_val: np.ndarray,
+    textos_extras_w2v: list[str] | None = None,
     dim_embedding: int = 128,
-    dim_oculto: int = 256,
-    num_camadas: int = 2,
-    random_state: int = 42,
+    max_vocab: int = 30000,
+    comprimento_maximo: int = 500,
+    batch_size: int = 64,
+    epocas: int = 15,
+    lr: float = 1e-3,
+    paciencia_early_stopping: int = 3
 ):
     """
-    Treina o BiLSTM com atencao. Melhorias sobre BiLSTM simples:
-    - CrossEntropyLoss ponderada: compensa o desbalanceamento de classes
-    - Gradient clipping (max_norm=1.0): estabiliza treinamento de LSTMs profundas
-    - ReduceLROnPlateau: reduz lr se F1-Val parar de melhorar (patience=2)
-    - Salva melhor checkpoint por F1-Macro de validacao
-    Retorna: (modelo, vocabulario, DataFrame com historico de treinamento)
+    Treinador mestre: acopla os textos -1 no Word2Vec, balanceia a Loss e salva o pico de F1-Macro.
     """
-    if not _TORCH_OK:
-        raise ImportError("PyTorch nao instalado. Execute: pip install torch")
-
-    torch.manual_seed(random_state)
-    np.random.seed(random_state)
-
-    textos_treino_list = list(textos_treino)
-    textos_validacao_list = list(textos_validacao)
-    y_treino_arr = np.asarray(list(y_treino))
-    y_validacao_arr = np.asarray(list(y_validacao))
-
-    vocabulario = construir_vocabulario(textos_treino_list, max_vocabulario=max_vocabulario)
-
-    dataset_treino = DatasetSequencias(
-        textos_treino_list, y_treino_arr, vocabulario, comprimento_max
+    if not (_TORCH_OK and _GENSIM_OK):
+        raise ImportError("PyTorch ou Gensim ausentes no ambiente.")
+        
+    # Constroi o vocabulario numerico
+    vocabulario = construir_vocabulario(textos_treino, max_vocabulario=max_vocab, minimo_frequencia=2)
+    
+    # Ger matriz interna com os textos de treino + os textos -1
+    matriz_w2v = gerar_matriz_embedding_interna(
+        textos_treino=textos_treino, 
+        vocabulario=vocabulario, 
+        dimensao=dim_embedding,
+        textos_extras_w2v=textos_extras_w2v
     )
-    dataset_validacao = DatasetSequencias(
-        textos_validacao_list, y_validacao_arr, vocabulario, comprimento_max
-    )
+    
+    # Converte os textos em Datasets PyTorch
+    ds_tr = DatasetSequencias(textos_treino, y_treino, vocabulario, comprimento_maximo)
+    ds_vl = DatasetSequencias(textos_val, y_val, vocabulario, comprimento_maximo)
+    
+    loader_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True)
+    loader_vl = DataLoader(ds_vl, batch_size=batch_size, shuffle=False)
+    
+    dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    np.random.seed(42)
+    print(f"\n[Motor BiLSTM] Rodando no hardware: {dispositivo}")
+    
+    modelo = BiLSTMAtencaoNativa(matriz_pesos=matriz_w2v, dimensao_oculta=256).to(dispositivo)
+    
+    # Pesos para classes (arrumar o desbalancemaneto)
+    contagem = Counter(y_treino.tolist())
+    total_amostras = len(y_treino)
+    n_classes = len(MAPEAMENTO_CLASSES)
+    pesos_por_classe = [(total_amostras / (n_classes * max(contagem.get(i, 1), 1))) for i in range(n_classes)]
+    
+    tensor_pesos = torch.tensor(pesos_por_classe, dtype=torch.float).to(dispositivo)
+    criterio = nn.CrossEntropyLoss(weight=tensor_pesos)
+    
+    otimizador = optim.AdamW(modelo.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(otimizador, mode='max', patience=1, factor=0.5)
+    
+    melhor_f1 = -1.0
+    melhor_estado = None
+    historico = []
+    sem_melhorar = 0
+    
+    for epoca in range(epocas):
+        modelo.train()
+        perdas_treino = []
+        for lote in loader_tr:
+            x, y = lote["input_ids"].to(dispositivo), lote["labels"].to(dispositivo)
+            
+            otimizador.zero_grad()
+            logits = modelo(x)
+            perda = criterio(logits, y)
+            perda.backward()
+            nn.utils.clip_grad_norm_(modelo.parameters(), max_norm=1.0)
+            otimizador.step()
+            perdas_treino.append(perda.item())
+            
+        modelo.eval()
+        preds_val, rots_val = [], []
+        with torch.no_grad():
+            for lote in loader_vl:
+                x = lote["input_ids"].to(dispositivo)
+                logits = modelo(x)
+                preds = torch.argmax(logits, dim=1).cpu().numpy()
+                preds_val.extend(preds)
+                rots_val.extend(lote["labels"].numpy())
+                
+        f1_atual = f1_score(rots_val, preds_val, average="macro")
+        loss_media = float(np.mean(perdas_treino))
+        scheduler.step(f1_atual)
+        
+        historico.append({"epoca": epoca+1, "loss_treino": loss_media, "f1_macro_val": f1_atual})
+        print(f"    Epoca {epoca+1:02d}/{epocas} | Loss Treino: {loss_media:.4f} | F1-Macro Val: {f1_atual:.4f}")
+        
+        if f1_atual > melhor_f1:
+            melhor_f1 = f1_atual
+            melhor_estado = {k: v.cpu().clone() for k, v in modelo.state_dict().items()}
+            sem_melhorar = 0
+        else:
+            sem_melhorar += 1
+            
+        if sem_melhorar >= paciencia_early_stopping:
+            print(f"  [Early Stopping] Rede sem evolucao. Treino interrompido na epoca {epoca+1}.")
+            break
+            
+    modelo.load_state_dict(melhor_estado)
+    print(f"--- TREINO CONCLUIDO | Pico de F1-Macro Val (BiLSTM Nativa): {melhor_f1:.4f} ---")
+    
+    return modelo, vocabulario, pd.DataFrame(historico)
 
-    loader_treino = DataLoader(dataset_treino, batch_size=tamanho_lote, shuffle=True)
-    loader_validacao = DataLoader(dataset_validacao, batch_size=tamanho_lote, shuffle=False)
+if _TORCH_OK:
+    class DatasetInferencia(Dataset):
+        """
+        Alimentador de dados cego: entrega apenas os textos (convertidos em números) para processar
+        """
+        def __init__(self, textos: list[str], vocabulario: dict[str, int], comprimento_maximo: int):
+            self.textos = textos
+            self.vocabulario = vocabulario
+            self.comprimento_maximo = comprimento_maximo
+
+        def __len__(self):
+            return len(self.textos)
+
+        def __getitem__(self, idx):
+            texto_fatiado = str(self.textos[idx]).split()
+            
+            # Converte a palavra string no ID numérico do nosso dicionário. 
+            # Se a palavra for inédita (não está no dicionário), recebe 0 (o vetor nulo <UNK>/<PAD>)
+            indices = [self.vocabulario.get(palavra, 0) for palavra in texto_fatiado]
+            
+            # Corta se for maior que 500; preenche com zeros no final se for menor que 500
+            if len(indices) < self.comprimento_maximo:
+                indices = indices + [0] * (self.comprimento_maximo - len(indices))
+            else:
+                indices = indices[:self.comprimento_maximo]
+                
+            return torch.tensor(indices, dtype=torch.long)
+
+
+def gerar_submissao_bilstm(
+    modelo: torch.nn.Module, 
+    vocabulario: dict[str, int], 
+    df_teste: pd.DataFrame, 
+    coluna_id: str = "Id",
+    coluna_texto: str = "texto_limpo",
+    comprimento_maximo: int = 500,
+    batch_size: int = 64,
+    nome_ficheiro_csv: str = "submissao_bilstm.csv"
+) -> pd.DataFrame:
+    """
+    Desliga os motores de treino, passa as petições inéditas pela rede e salva o .csv final.
+    """
+    print(f"  Prepararanda as {len(df_teste):,} de teste para a BiLSTM...")
+    
+    # Monta a linha de montagem de dados para o teste
+    textos_teste = df_teste[coluna_texto].tolist()
+    ds_teste = DatasetInferencia(textos_teste, vocabulario, comprimento_maximo)
+    loader_teste = DataLoader(ds_teste, batch_size=batch_size, shuffle=False)
+    
+    dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    modelo = modelo.to(dispositivo)
+    
+    modelo.eval()
+    
+    predicoes_finais = []
+    
+    with torch.no_grad():
+        for lote_x in loader_teste:
+            x = lote_x.to(dispositivo)
+            logits = modelo(x)
+            classes_vencedoras = torch.argmax(logits, dim=1).cpu().numpy()
+            predicoes_finais.extend(classes_vencedoras)
+            
+    df_submissao = pd.DataFrame({
+        "Id": df_teste[coluna_id],
+        "Category": predicoes_finais
+    })
+    
+    df_submissao.to_csv(nome_ficheiro_csv, index=False)
+    print(f"  [Sucesso] '{nome_ficheiro_csv}' guardado com {len(df_submissao)} predições!")
+    
+    return df_submissao
+
+
+# =========================================================
+
+class DatasetBERTUnificado(Dataset):
+    """
+    Alimentador Sênior: Realiza a amputação Head + Tail estritamente a nível de Subwords (WordPiece),
+    garantindo que a decisão final do juiz nunca seja descartada pelo limite de 512.
+    """
+    def __init__(self, textos: list[str], rotulos: Iterable | None, tokenizer, max_len: int = 512):
+        self.textos = textos
+        self.rotulos = list(rotulos) if rotulos is not None else None
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.textos)
+
+    def __getitem__(self, idx):
+        texto = str(self.textos[idx])
+        
+        # Tokenizamos o texto inteiro em IDs brutos (SEM truncar, SEM special tokens)
+        ids_brutos = self.tokenizer.encode(texto, add_special_tokens=False)
+        
+        # Reserva 2 espaços obrigatórios para [CLS] e [SEP] -> sobram 510 vagas dinâmicas
+        vagas = self.max_len - 2
+        
+        if len(ids_brutos) > vagas:
+            # HEAD + TAIL DE SUBWORDS JURÍDICAS
+            # Agarra 128 subwords da frente (Petição inicial) e as últimas 382 subwords do final absoluto (Veredito)
+            head = ids_brutos[:128]
+            tail = ids_brutos[-(vagas - 128):]
+            input_ids = [self.tokenizer.cls_token_id] + head + tail + [self.tokenizer.sep_token_id]
+        else:
+            input_ids = [self.tokenizer.cls_token_id] + ids_brutos + [self.tokenizer.sep_token_id]
+            
+        # Preenchimento manual de zeros (Padding) e montagem da Attention Mask
+        tamanho_real = len(input_ids)
+        pad_falta = self.max_len - tamanho_real
+        
+        input_ids = input_ids + [self.tokenizer.pad_token_id] * pad_falta
+        attention_mask = [1] * tamanho_real + [0] * pad_falta
+        
+        item = {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long)
+        }
+        
+        if self.rotulos is not None:
+            item['labels'] = torch.tensor(int(self.rotulos[idx]), dtype=torch.long)
+            
+        return item
+
+
+def treinar_legal_bert_otimizado(
+    textos_treino: list[str],
+    y_treino: Iterable,
+    textos_val: list[str],
+    y_val: Iterable,
+    nome_modelo: str = "rufimelo/Legal-BERTimbau-base",
+    max_len: int = 512,
+    batch_size: int = 16,       
+    acumulo_grad: int = 2,      
+    epocas: int = 4,            
+    lr: float = 2e-5
+):
+    print(f"  [Legal-BERT] Instanciando a arquitetura '{nome_modelo}'...")
+    tokenizer = AutoTokenizer.from_pretrained(nome_modelo)
+    modelo = AutoModelForSequenceClassification.from_pretrained(nome_modelo, num_labels=5)
+
+    ds_tr = DatasetBERTUnificado(textos_treino, y_treino, tokenizer, max_len)
+    ds_vl = DatasetBERTUnificado(textos_val, y_val, tokenizer, max_len)
+
+    loader_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True)
+    loader_vl = DataLoader(ds_vl, batch_size=batch_size, shuffle=False)
 
     dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"  Dispositivo: {dispositivo}")
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    np.random.seed(42)
+    print(f"  [Legal-BERT] Motor alocado no hardware: {dispositivo}")
+    modelo = modelo.to(dispositivo)
 
-    modelo = BiLSTMAtencao(
-        tamanho_vocabulario=len(vocabulario),
-        dimensao_embedding=dim_embedding,
-        dimensao_oculta=dim_oculto,
-        n_camadas=num_camadas,
-        dropout=dropout,
-    ).to(dispositivo)
+    lista_y_treino = [int(r) for r in y_treino]
+    contagem = Counter(lista_y_treino)
+    total_amostras = len(lista_y_treino)
+    n_classes = len(set(lista_y_treino))
+    
+    pesos = [total_amostras / (n_classes * max(contagem.get(i, 1), 1)) for i in range(n_classes)]
+    tensor_pesos = torch.tensor(pesos, dtype=torch.float).to(dispositivo)
+    criterio = torch.nn.CrossEntropyLoss(weight=tensor_pesos)
 
-    # Pesos inversamente proporcionais a frequencia de cada classe
-    contagem_classes = Counter(y_treino_arr.tolist())
-    n_total = len(y_treino_arr)
-    n_classes = len(MAPEAMENTO_CLASSES)
-    pesos = torch.tensor(
-        [n_total / (n_classes * max(contagem_classes.get(i, 1), 1)) for i in range(n_classes)],
-        dtype=torch.float,
-    ).to(dispositivo)
+    otimizador = torch.optim.AdamW(modelo.parameters(), lr=lr, weight_decay=1e-4)
+    passos_totais = (len(loader_tr) // acumulo_grad) * epocas
+    scheduler = get_linear_schedule_with_warmup(otimizador, num_warmup_steps=int(passos_totais * 0.1), num_training_steps=passos_totais)
 
-    criterio = nn.CrossEntropyLoss(weight=pesos)
-    otimizador = optim.Adam(modelo.parameters(), lr=taxa_aprendizagem, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        otimizador, mode="max", patience=2, factor=0.5
-    )
-
+    scaler = torch.cuda.amp.GradScaler()
     melhor_f1 = -1.0
     melhor_estado = None
     historico = []
 
     for epoca in range(epocas):
         modelo.train()
-        perdas_treino = []
-        for lote in loader_treino:
-            entradas = lote["input_ids"].to(dispositivo)
-            rotulos = lote["labels"].to(dispositivo)
+        perdas_epoca = []
+        otimizador.zero_grad()
 
-            otimizador.zero_grad()
-            logits = modelo(entradas)
-            perda = criterio(logits, rotulos)
-            perda.backward()
-            nn.utils.clip_grad_norm_(modelo.parameters(), max_norm=1.0)
-            otimizador.step()
-            perdas_treino.append(float(perda.item()))
+        for passo, lote in enumerate(loader_tr):
+            b_ids = lote['input_ids'].to(dispositivo)
+            b_mask = lote['attention_mask'].to(dispositivo)
+            b_labels = lote['labels'].to(dispositivo)
+
+            with torch.amp.autocast("cuda"):
+                saida = modelo(input_ids=b_ids, attention_mask=b_mask)
+                perda = criterio(saida.logits, b_labels) / acumulo_grad
+
+            scaler.scale(perda).backward()
+            perdas_epoca.append(perda.item() * acumulo_grad)
+
+            if (passo + 1) % acumulo_grad == 0 or (passo + 1) == len(loader_tr):
+                scaler.unscale_(otimizador)
+                torch.nn.utils.clip_grad_norm_(modelo.parameters(), max_norm=1.0)
+                scaler.step(otimizador)
+                scaler.update()
+                scheduler.step()
+                otimizador.zero_grad()
 
         modelo.eval()
-        predicoes_val = []
-        rotulos_val = []
+        preds_val, rots_val = [], []
         with torch.no_grad():
-            for lote in loader_validacao:
-                entradas = lote["input_ids"].to(dispositivo)
-                rots = lote["labels"].cpu().numpy()
-                logits = modelo(entradas)
-                preds = torch.argmax(logits, dim=1).cpu().numpy()
-                predicoes_val.extend(preds.tolist())
-                rotulos_val.extend(rots.tolist())
+            for lote_vl in loader_vl:
+                b_ids = lote_vl['input_ids'].to(dispositivo)
+                b_mask = lote_vl['attention_mask'].to(dispositivo)
 
-        f1_macro = f1_score(rotulos_val, predicoes_val, average="macro")
-        loss_media = float(np.mean(perdas_treino))
-        scheduler.step(f1_macro)
+                with torch.amp.autocast("cuda"):
+                    logits = modelo(input_ids=b_ids, attention_mask=b_mask).logits
+                    
+                preds_val.extend(torch.argmax(logits, dim=1).cpu().numpy())
+                rots_val.extend(lote_vl['labels'].cpu().numpy())
 
-        historico.append({
-            "epoca": epoca + 1,
-            "loss_treino": loss_media,
-            "f1_macro_validacao": float(f1_macro),
-        })
-        print(
-            f"  Epoca {epoca + 1:02d}/{epocas} | "
-            f"Loss: {loss_media:.4f} | F1-Val: {f1_macro:.4f}"
-        )
+        f1_atual = f1_score(rots_val, preds_val, average="macro")
+        loss_m = float(np.mean(perdas_epoca))
+        historico.append({"epoca": epoca+1, "loss_treino": loss_m, "f1_macro_val": f1_atual})
 
-        if f1_macro > melhor_f1:
-            melhor_f1 = f1_macro
-            melhor_estado = {
-                k: v.detach().cpu() for k, v in modelo.state_dict().items()
-            }
+        print(f"    Época {epoca+1:02d}/{epocas} | Loss Treino: {loss_m:.4f} | F1-Macro Val: {f1_atual:.4f}")
 
-    if melhor_estado is not None:
-        modelo.load_state_dict(melhor_estado)
+        if f1_atual > melhor_f1:
+            melhor_f1 = f1_atual
+            melhor_estado = {k: v.cpu().clone() for k, v in modelo.state_dict().items()}
 
-    print(f"  Melhor F1-Val (BiLSTM): {melhor_f1:.4f}")
-    return modelo, vocabulario, pd.DataFrame(historico)
+    modelo.load_state_dict(melhor_estado)
+    print(f"--- FINE-TUNING JURÍDICO CONCLUÍDO | Pico de F1-Macro Val (Legal-BERT): {melhor_f1:.4f} ---")
+    return modelo, tokenizer, pd.DataFrame(historico)
 
 
-def predizer_bilstm(
-    modelo,
-    textos: Iterable[str],
-    vocabulario: dict[str, int],
-    comprimento_max: int = 300,
-    batch_size: int = 128,
-) -> np.ndarray:
-    """Gera predicoes do BiLSTM em modo de inferencia."""
-    if not _TORCH_OK:
-        raise ImportError("PyTorch nao instalado.")
-
-    dataset = DatasetSequencias(
-        textos=list(textos),
-        rotulos=None,
-        vocabulario=vocabulario,
-        comprimento_maximo=comprimento_max,
-    )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    dispositivo = next(modelo.parameters()).device
+def gerar_submissao_legal_bert(
+    modelo, 
+    tokenizer, 
+    df_teste: pd.DataFrame, 
+    coluna_id: str = "Id", 
+    coluna_texto: str = "texto_limpo",
+    max_len: int = 512,
+    batch_size: int = 32, 
+    nome_ficheiro_csv: str = "submissao_legal_bert_v1.csv"
+) -> pd.DataFrame:
+    print(f"  [Legal-BERT Inferência] Lendo {len(df_teste):,} processos inéditos de teste...")
+    dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    modelo = modelo.to(dispositivo)
     modelo.eval()
 
-    predicoes = []
+    ds_teste = DatasetBERTUnificado(df_teste[coluna_texto].tolist(), rotulos=None, tokenizer=tokenizer, max_len=max_len)
+    loader_teste = DataLoader(ds_teste, batch_size=batch_size, shuffle=False)
+
+    preds_finais = []
     with torch.no_grad():
-        for lote in loader:
-            entradas = lote["input_ids"].to(dispositivo)
-            logits = modelo(entradas)
-            predicoes.extend(torch.argmax(logits, dim=1).cpu().numpy().tolist())
+        for lote in loader_teste:
+            b_ids = lote['input_ids'].to(dispositivo)
+            b_mask = lote['attention_mask'].to(dispositivo)
 
-    return np.asarray(predicoes)
+            with torch.amp.autocast("cuda"):
+                logits = modelo(input_ids=b_ids, attention_mask=b_mask).logits
 
+            preds_finais.extend(torch.argmax(logits, dim=1).cpu().numpy())
 
-# ==============================================================
-# TRANSFORMERS - BERTimbau (fine-tuning)
-# ==============================================================
-
-if _TORCH_OK:
-
-    class DatasetTransformer(Dataset):
-        """Dataset PyTorch compativel com HuggingFace Trainer."""
-
-        def __init__(self, encodings, labels=None) -> None:
-            self.encodings = encodings
-            self.labels = labels
-
-        def __len__(self) -> int:
-            return len(self.encodings["input_ids"])
-
-        def __getitem__(self, indice: int):
-            item = {
-                chave: torch.tensor(valor[indice], dtype=torch.long)
-                for chave, valor in self.encodings.items()
-            }
-            if self.labels is not None:
-                item["labels"] = torch.tensor(self.labels[indice], dtype=torch.long)
-            return item
-
-else:
-    class DatasetTransformer:  # type: ignore
-        pass
-
-
-def treinar_transformer(
-    textos_treino: Iterable[str],
-    y_treino,
-    textos_validacao: Iterable[str],
-    y_validacao,
-    nome_modelo: str = "neuralmind/bert-base-portuguese-cased",
-    diretorio_saida: str = "resultados_transformer",
-    comprimento_maximo: int = 256,
-    comprimento_max: int | None = None,
-    batch_size: int = 16,
-    tamanho_lote: int | None = None,
-    epocas: int = 3,
-    num_epocas: int | None = None,
-    taxa_aprendizado: float = 2e-5,
-    taxa_aprendizagem: float | None = None,
-):
-    """
-    Fine-tuning do BERTimbau para classificacao de documentos juridicos.
-
-    Configuracoes de treinamento:
-    - warmup_ratio=0.1: 10% dos steps com warmup linear do lr
-    - weight_decay=0.01: regularizacao L2 para evitar overfitting
-    - fp16: precisao mista em GPU (acelera treinamento ~2x)
-    - EarlyStoppingCallback: interrompe se F1-Macro nao melhorar em 2 epochs
-    - load_best_model_at_end: restaura melhor checkpoint automaticamente
-
-    Retorna: (trainer, tokenizador)
-    """
-    if not (_TRANSFORMERS_OK and _TORCH_OK):
-        raise ImportError("transformers e/ou torch nao instalados.")
-
-    import os
-    os.makedirs(diretorio_saida, exist_ok=True)
-
-    dispositivo = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"  Dispositivo: {dispositivo} | Modelo: {nome_modelo}")
-
-    if num_epocas is not None:
-        epocas = num_epocas
-    if tamanho_lote is not None:
-        batch_size = tamanho_lote
-    if comprimento_max is not None:
-        comprimento_maximo = comprimento_max
-    if taxa_aprendizagem is not None:
-        taxa_aprendizado = taxa_aprendizagem
-
-    tokenizador = AutoTokenizer.from_pretrained(nome_modelo)
-    modelo_bert = AutoModelForSequenceClassification.from_pretrained(
-        nome_modelo, num_labels=len(MAPEAMENTO_CLASSES)
-    )
-
-    def _tokenizar(textos):
-        return tokenizador(
-            list(textos), max_length=comprimento_maximo,
-            truncation=True, padding="max_length",
-        )
-
-    print("  Tokenizando treino e validacao...")
-    enc_treino = _tokenizar(textos_treino)
-    enc_validacao = _tokenizar(textos_validacao)
-
-    ds_treino = DatasetTransformer(enc_treino, list(y_treino))
-    ds_validacao = DatasetTransformer(enc_validacao, list(y_validacao))
-
-    def calcular_metricas(eval_pred):
-        logits, labels = eval_pred
-        predicoes = np.argmax(logits, axis=-1)
-        return {
-            "accuracy": float(accuracy_score(labels, predicoes)),
-            "f1_macro": float(f1_score(labels, predicoes, average="macro")),
-        }
-
-    # Compatibilidade com versoes antigas e novas do transformers
-    argumentos_base = dict(
-        output_dir=diretorio_saida,
-        learning_rate=taxa_aprendizado,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size * 2,
-        num_train_epochs=epocas,
-        warmup_ratio=0.1,
-        weight_decay=0.01,
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="f1_macro",
-        greater_is_better=True,
-        logging_steps=100,
-        seed=42,
-        fp16=(dispositivo == "cuda"),
-        report_to="none",
-    )
-
-    try:
-        argumentos = TrainingArguments(
-            eval_strategy="epoch", save_strategy="epoch", **argumentos_base
-        )
-    except TypeError:
-        try:
-            argumentos = TrainingArguments(
-                evaluation_strategy="epoch", save_strategy="epoch", **argumentos_base
-            )
-        except Exception:
-            argumentos = TrainingArguments(**argumentos_base)
-
-    callbacks = []
-    if _TRANSFORMERS_OK:
-        try:
-            callbacks.append(EarlyStoppingCallback(early_stopping_patience=2))
-        except Exception:
-            pass
-
-    # Suporte a 'processing_class' (novo) ou 'tokenizer' (legado)
-    try:
-        trainer = Trainer(
-            model=modelo_bert,
-            args=argumentos,
-            train_dataset=ds_treino,
-            eval_dataset=ds_validacao,
-            processing_class=tokenizador,
-            compute_metrics=calcular_metricas,
-            callbacks=callbacks,
-        )
-    except TypeError:
-        trainer = Trainer(
-            model=modelo_bert,
-            args=argumentos,
-            train_dataset=ds_treino,
-            eval_dataset=ds_validacao,
-            tokenizer=tokenizador,
-            compute_metrics=calcular_metricas,
-            callbacks=callbacks,
-        )
-
-    print("  Iniciando fine-tuning do BERTimbau...")
-    trainer.train()
-    return trainer, tokenizador
-
-
-def predizer_transformer(
-    trainer,
-    tokenizador,
-    textos: Iterable[str],
-    comprimento_maximo: int = 256,
-) -> np.ndarray:
-    """Gera predicoes do transformer em modo de inferencia."""
-    encodings = tokenizador(
-        list(textos),
-        truncation=True,
-        padding="max_length",
-        max_length=comprimento_maximo,
-    )
-    dataset = DatasetTransformer(encodings, labels=None)
-    resultado = trainer.predict(dataset)
-    return np.argmax(resultado.predictions, axis=-1)
-
-
-# ==============================================================
-# PREPARACAO PARA INFERENCIA (modelos classicos)
-# ==============================================================
-
-def preparar_predicao(
-    textos: Iterable[str],
-    representacao: str,
-    artefato_representacao,
-) -> np.ndarray:
-    """
-    Transforma textos para inferencia com o artefato de representacao salvo.
-    Suporta TF-IDF (esparso), Word2Vec (denso) e Naive Bayes (TF-IDF + scaler).
-    """
-    if representacao == "TF-IDF":
-        if isinstance(artefato_representacao, tuple):
-            scaler, vetorizador = artefato_representacao
-            return scaler.transform(vetorizador.transform(list(textos)))
-        return artefato_representacao.transform(list(textos))
-    if representacao == "Word2Vec":
-        return vetorizar_word2vec_media(textos, artefato_representacao)
-    raise ValueError(f"Representacao nao suportada: {representacao}")
-
-
-def ajustar_modelo_final(
-    nome_modelo: str,
-    representacao: str,
-    textos_treino: Iterable[str],
-    y_treino,
-):
-    """
-    Treina o modelo selecionado com todos os dados de treino (sem validacao).
-    Usado para gerar a submissao final apos selecionar o melhor modelo.
-    """
-    textos_treino_list = list(textos_treino)
-    y_treino_arr = np.asarray(list(y_treino))
-
-    if representacao == "TF-IDF":
-        vet, X_treino = vetorizar_tfidf(textos_treino_list)
-        if "Naive Bayes" in nome_modelo:
-            scaler = MaxAbsScaler()
-            X_treino = scaler.fit_transform(X_treino)
-            modelo = treinar_naive_bayes(X_treino, y_treino_arr)
-            return modelo, (scaler, vet)
-        elif "Regressao Logistica" in nome_modelo:
-            modelo = treinar_regressao_logistica(X_treino, y_treino_arr)
-        elif "SVM" in nome_modelo:
-            modelo = treinar_svm_linear(X_treino, y_treino_arr)
-        else:
-            raise ValueError(f"Modelo nao suportado: {nome_modelo}")
-        return modelo, vet
-
-    if representacao == "Word2Vec":
-        modelo_w2v = treinar_word2vec(textos_treino_list)
-        X_treino = vetorizar_word2vec_media(textos_treino_list, modelo_w2v)
-        modelo = treinar_regressao_logistica(X_treino, y_treino_arr)
-        return modelo, modelo_w2v
-
-    raise ValueError(f"Representacao nao suportada: {representacao}")
-
-
-__all__ = [
-    "MAPEAMENTO_CLASSES",
-    "ResultadoExperimento",
-    "dividir_treino_validacao",
-    "criar_vetorizador_tfidf",
-    "vetorizar_tfidf",
-    "tokenizar_para_word2vec",
-    "treinar_word2vec",
-    "vetorizar_word2vec_media",
-    "treinar_regressao_logistica",
-    "treinar_svm_linear",
-    "treinar_naive_bayes",
-    "avaliar_modelo_em_validacao",
-    "avaliar_validacao_cruzada",
-    "executar_baselines_classicos",
-    "aplicar_ner_juridico",
-    "extrair_mencoes_legais_amostra",
-    "TokenizadorBiLSTM",
-    "construir_vocabulario",
-    "codificar_texto",
-    "DatasetSequencias",
-    "BiLSTMAtencao",
-    "treinar_bilstm",
-    "predizer_bilstm",
-    "DatasetTransformer",
-    "treinar_transformer",
-    "predizer_transformer",
-    "preparar_predicao",
-    "ajustar_modelo_final",
-]
+    df_submissao = pd.DataFrame({
+        "Id": df_teste[coluna_id],
+        "Category": preds_finais
+    })
+    df_submissao.to_csv(nome_ficheiro_csv, index=False)
+    print(f"  [Sucesso] Ficheiro gerado: '{nome_ficheiro_csv}'")
+    return df_submissao

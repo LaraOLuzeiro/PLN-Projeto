@@ -7,8 +7,8 @@
 # Prof. Tiago A. Almeida
 #
 #
-# Nome:
-# RA:
+# Nome: Daniella Yuka Hirosue, Lara Oliveira Luzeiro, Renan Yugo Ueda
+# RA: 813008, 813259, 813346
 # ################################################################
 
 """
@@ -44,8 +44,6 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-
-from experimentos import preparar_predicao
 
 MAPEAMENTO_CLASSES = {
     0: "Acordao",
@@ -454,86 +452,3 @@ def analisar_erros(
         if coluna_texto in df_val.columns:
             texto = str(df_val.iloc[i][coluna_texto])[:120]
         print(f"  Real: {real:<12} | Previsto: {previsto:<12} | Texto: {texto}...")
-
-
-# ==============================================================
-# GERACAO DE SUBMISSAO
-# ==============================================================
-
-def gerar_submission(
-    modelo,
-    artefato_representacao,
-    textos_teste: Iterable[str],
-    ids_teste: Iterable[int],
-    representacao: str,
-    caminho_saida: str = "submission.csv",
-) -> pd.DataFrame:
-    """
-    Aplica o modelo nos textos de teste e gera arquivo submission.csv.
-    Formato esperado pela competicao: colunas Id e Category.
-    """
-    X_teste = preparar_predicao(
-        textos=textos_teste,
-        representacao=representacao,
-        artefato_representacao=artefato_representacao,
-    )
-    predicoes = modelo.predict(X_teste)
-    submission = pd.DataFrame({"Id": list(ids_teste), "Category": predicoes})
-    submission.to_csv(Path(caminho_saida), index=False)
-    print(f"\nSubmissao gerada: '{caminho_saida}' ({len(submission):,} predicoes)")
-    print("Distribuicao das predicoes:")
-    print(submission["Category"].value_counts().sort_index().to_string())
-    return submission
-
-
-def gerar_submissao(
-    ids_teste,
-    predicoes,
-    nome_arquivo: str = "submission.csv",
-) -> pd.DataFrame:
-    """
-    Gera arquivo de submissao no formato esperado pela competicao (Id, Category).
-    Interface simplificada para predicoes ja calculadas.
-    """
-    os.makedirs(
-        os.path.dirname(nome_arquivo) if os.path.dirname(nome_arquivo) else ".", exist_ok=True
-    )
-    df_sub = pd.DataFrame({"Id": list(ids_teste), "Category": list(predicoes)})
-    df_sub.to_csv(nome_arquivo, index=False)
-    print(f"\nSubmissao gerada: '{nome_arquivo}' ({len(df_sub):,} predicoes)")
-    print("Distribuicao das predicoes:")
-    print(df_sub["Category"].value_counts().sort_index().to_string())
-    return df_sub
-
-
-def gerar_submission_transformer(
-    predicoes,
-    ids_teste: Iterable[int],
-    caminho_saida: str = "submission_transformer.csv",
-) -> pd.DataFrame:
-    """
-    Gera arquivo de submissao a partir de predicoes do transformer.
-    Interface simplificada que aceita array de predicoes diretamente.
-    """
-    return gerar_submissao(ids_teste, predicoes, nome_arquivo=caminho_saida)
-
-
-__all__ = [
-    "MAPEAMENTO_CLASSES",
-    "NOMES_CLASSES",
-    "calcular_metricas_classificacao",
-    "gerar_relatorio_classificacao",
-    "exibir_relatorio",
-    "gerar_matriz_confusao",
-    "plotar_matriz_confusao",
-    "consolidar_resultados",
-    "comparar_modelos",
-    "selecionar_melhor_resultado",
-    "plotar_comparacao_modelos",
-    "plotar_curvas_treinamento",
-    "teste_mcnemar",
-    "analisar_erros",
-    "gerar_submission",
-    "gerar_submissao",
-    "gerar_submission_transformer",
-]

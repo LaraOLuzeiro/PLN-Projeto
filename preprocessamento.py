@@ -7,8 +7,8 @@
 # Prof. Tiago A. Almeida
 #
 #
-# Nome:
-# RA:
+# Nome: Daniella Yuka Hirosue, Lara Oliveira Luzeiro, Renan Yugo Ueda
+# RA: 813008, 813259, 813346
 # ################################################################
 
 """
@@ -637,6 +637,12 @@ def extrair_features_linguisticas(
     for _, row in df_analise.iterrows():
         texto_limpo = str(row[coluna])[:limite_chars]
 
+        # features de comprimento de texto
+        palavras_lista = texto_limpo.split()
+        n_palavras = len(palavras_lista)
+        n_caracteres = len(texto_limpo)
+        comp_medio_palavra = n_caracteres / max(n_palavras, 1)
+
         # 1. POS Tagging
         pares_pos = aplicar_pos_tagging(texto_limpo, nlp=nlp)
         contagem_pos = {}
@@ -657,6 +663,10 @@ def extrair_features_linguisticas(
 
         registros.append({
             "Category": row.get("Category", -1),
+            # Atributos de comprimento
+            "txt_n_caracteres": n_caracteres,
+            "txt_n_palavras": n_palavras,
+            "txt_comp_medio_palavra": comp_medio_palavra,
             # Atributos extraídos de NER e Regex
             "ner_n_entidades": len(ents),
             "ner_ent_por_100_tokens": 100 * len(ents) / total_pos,
@@ -718,28 +728,3 @@ def plotar_distribuicao_pos(
     if salvar_em:
         plt.savefig(salvar_em, dpi=120, bbox_inches="tight")
     plt.show()
-
-
-__all__ = [
-    "STOPWORDS",
-    "extrair_texto_json",
-    "corrigir_encoding",
-    "normalizar_unicode",
-    "remover_acentos",
-    "limpar_ruido_ocr",
-    "obter_stopwords_portugues",
-    "carregar_modelo_spacy",
-    "tokenizar_texto",
-    "remover_stopwords_tokens",
-    "lematizar_tokens",
-    "preprocessar_textos",
-    "aplicar_pipeline",
-    "aplicar_pos_tagging",
-    "extrair_entidades_nomeadas",
-    "extrair_mencoes_legais",
-    "extrair_features_linguisticas",
-    "plotar_distribuicao_pos",
-    "remover_documentos_duplicados",
-    "remover_textos_vazios",
-    "verificar_ruidos_dataset"
-]
