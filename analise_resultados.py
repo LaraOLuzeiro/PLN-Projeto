@@ -16,12 +16,13 @@ Modulo de Analise dos Resultados.
 
 Contem funcoes para:
   - Calculo de metricas de classificacao (F1-Macro, F1 por classe, Acuracia, etc.)
-  - Exibicao de relatorio de classificacao detalhado
   - Plotagem de matrizes de confusao (absoluta e normalizada)
   - Comparacao tabular e grafica de multiplos modelos
   - Curvas de treinamento (loss e F1-Val por epoca)
   - Teste estatistico de McNemar para comparar dois classificadores
   - Analise de erros (exemplos mal classificados)
+    - Avaliacao integrada de modelos classicos e profundos
+    - Inferencia por probabilidades (BiLSTM, Legal-BERT, Ensemble)
   - Geracao de arquivo submission.csv para a competicao Kaggle
 """
 
@@ -29,7 +30,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 from typing import Iterable
 
 import matplotlib.pyplot as plt
@@ -38,7 +38,6 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -71,91 +70,73 @@ def calcular_metricas_classificacao(
     penalizando igualmente erros em classes raras (Acordao, Despacho) e
     nas mais frequentes (RE). Inclui F1 por classe para analise detalhada.
     """
+    rotulos_ordenados = sorted(MAPEAMENTO_CLASSES)
     resultado = {
         "modelo": nome_modelo,
         "accuracy": float(accuracy_score(y_verdadeiro, y_predito)),
-        "f1_macro": float(f1_score(y_verdadeiro, y_predito, average="macro", zero_division=0)),
-        "f1_weighted": float(f1_score(y_verdadeiro, y_predito, average="weighted", zero_division=0)),
-        "f1_micro": float(f1_score(y_verdadeiro, y_predito, average="micro", zero_division=0)),
+        "f1_macro": float(
+            f1_score(
+                y_verdadeiro,
+                y_predito,
+                labels=rotulos_ordenados,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "f1_weighted": float(
+            f1_score(
+                y_verdadeiro,
+                y_predito,
+                labels=rotulos_ordenados,
+                average="weighted",
+                zero_division=0,
+            )
+        ),
+        "f1_micro": float(
+            f1_score(
+                y_verdadeiro,
+                y_predito,
+                labels=rotulos_ordenados,
+                average="micro",
+                zero_division=0,
+            )
+        ),
         "precision_macro": float(
-            precision_score(y_verdadeiro, y_predito, average="macro", zero_division=0)
+            precision_score(
+                y_verdadeiro,
+                y_predito,
+                labels=rotulos_ordenados,
+                average="macro",
+                zero_division=0,
+            )
         ),
         "recall_macro": float(
-            recall_score(y_verdadeiro, y_predito, average="macro", zero_division=0)
+            recall_score(
+                y_verdadeiro,
+                y_predito,
+                labels=rotulos_ordenados,
+                average="macro",
+                zero_division=0,
+            )
         ),
     }
     # F1 por classe (granularidade para analise por tipo de documento)
-    f1_por_classe = f1_score(y_verdadeiro, y_predito, average=None, zero_division=0)
+    f1_por_classe = f1_score(
+        y_verdadeiro,
+        y_predito,
+        labels=rotulos_ordenados,
+        average=None,
+        zero_division=0,
+    )
     for i, nome in enumerate(NOMES_CLASSES):
         resultado[f"f1_{nome}"] = float(f1_por_classe[i]) if i < len(f1_por_classe) else 0.0
 
     return resultado
 
 
-def gerar_relatorio_classificacao(
-    y_verdadeiro,
-    y_predito,
-    nomes_classes: dict[int, str] | None = None,
-) -> pd.DataFrame:
-    """
-    Gera relatorio de classificacao completo (precision, recall, F1 por classe).
-    Retorna DataFrame com linhas por classe e colunas de metricas.
-    """
-    nomes_classes = nomes_classes or MAPEAMENTO_CLASSES
-    rotulos_ordenados = sorted(nomes_classes)
-    relatorio = classification_report(
-        y_verdadeiro,
-        y_predito,
-        labels=rotulos_ordenados,
-        target_names=[nomes_classes[r] for r in rotulos_ordenados],
-        output_dict=True,
-        zero_division=0,
-    )
-    return pd.DataFrame(relatorio).transpose()
-
-
-def exibir_relatorio(
-    y_verdadeiro,
-    y_predito,
-    nome_modelo: str = "Modelo",
-) -> dict:
-    """
-    Exibe classification_report completo e metricas resumidas no console.
-    Retorna dicionario de metricas para uso posterior.
-    """
-    print(f"\n{'=' * 62}")
-    print(f"RELATORIO: {nome_modelo}")
-    print("=" * 62)
-    print(classification_report(
-        y_verdadeiro, y_predito,
-        target_names=NOMES_CLASSES, zero_division=0,
-    ))
-    m = calcular_metricas_classificacao(y_verdadeiro, y_predito, nome_modelo)
-    print(f"  F1-Macro    : {m['f1_macro']:.4f}   <- metrica principal")
-    print(f"  F1-Weighted : {m['f1_weighted']:.4f}")
-    print(f"  Acuracia    : {m['accuracy']:.4f}")
-    return m
-
-
 # ==============================================================
 # MATRIZ DE CONFUSAO
 # ==============================================================
-
-def gerar_matriz_confusao(
-    y_verdadeiro,
-    y_predito,
-    nomes_classes: dict[int, str] | None = None,
-) -> pd.DataFrame:
-    """
-    Gera matriz de confusao como DataFrame com nomes das classes.
-    Linhas = classes reais; colunas = classes preditas.
-    """
-    nomes_classes = nomes_classes or MAPEAMENTO_CLASSES
-    rotulos_ordenados = sorted(nomes_classes)
-    matriz = confusion_matrix(y_verdadeiro, y_predito, labels=rotulos_ordenados)
-    nomes = [nomes_classes[r] for r in rotulos_ordenados]
-    return pd.DataFrame(matriz, index=nomes, columns=nomes)
-
 
 def plotar_matriz_confusao(
     y_verdadeiro=None,
@@ -213,17 +194,6 @@ def plotar_matriz_confusao(
 # COMPARACAO DE MODELOS
 # ==============================================================
 
-def consolidar_resultados(resultados: Iterable[dict]) -> pd.DataFrame:
-    """
-    Consolida lista de resultados de experimentos em DataFrame ordenado por F1-Macro.
-    """
-    tabela = pd.DataFrame(list(resultados))
-    if tabela.empty:
-        return tabela
-    colunas_ord = [c for c in ["f1_macro", "accuracy"] if c in tabela.columns]
-    return tabela.sort_values(colunas_ord, ascending=False).reset_index(drop=True)
-
-
 def comparar_modelos(lista_resultados: list[dict]) -> pd.DataFrame:
     """
     Recebe lista de dicionarios retornados por calcular_metricas_classificacao().
@@ -234,21 +204,14 @@ def comparar_modelos(lista_resultados: list[dict]) -> pd.DataFrame:
         df = df.set_index("modelo")
     df = df.sort_values("f1_macro", ascending=False)
 
+    cols_meta = ["familia", "protocolo_validacao", "n_amostras_validacao"]
     cols_princ = ["f1_macro", "f1_weighted", "accuracy", "precision_macro", "recall_macro"]
-    cols_disp = [c for c in cols_princ if c in df.columns]
+    cols_disp = [c for c in (cols_meta + cols_princ) if c in df.columns]
 
     print("\nComparacao de Modelos (ordenado por F1-Macro):")
     print("=" * 70)
     print(df[cols_disp].round(4).to_string())
     return df
-
-
-def selecionar_melhor_resultado(tabela_resultados: pd.DataFrame) -> pd.Series:
-    """Retorna a linha do melhor resultado (maior F1-Macro)."""
-    if tabela_resultados.empty:
-        raise ValueError("A tabela de resultados esta vazia.")
-    colunas_ord = [c for c in ["f1_macro", "accuracy"] if c in tabela_resultados.columns]
-    return tabela_resultados.sort_values(colunas_ord, ascending=False).iloc[0]
 
 
 def plotar_comparacao_modelos(
@@ -334,10 +297,16 @@ def plotar_curvas_treinamento(
 
     if isinstance(historico, pd.DataFrame):
         loss_treino = historico["loss_treino"].tolist()
-        f1_val = historico.get("f1_macro_validacao", historico.get("f1_val", pd.Series())).tolist()
+        f1_val = historico.get(
+            "f1_macro_validacao",
+            historico.get("f1_macro_val", historico.get("f1_val", pd.Series())),
+        ).tolist()
     else:
         loss_treino = historico.get("loss_treino", [])
-        f1_val = historico.get("f1_val", historico.get("f1_macro_validacao", []))
+        f1_val = historico.get(
+            "f1_macro_validacao",
+            historico.get("f1_macro_val", historico.get("f1_val", [])),
+        )
 
     epocas = range(1, len(loss_treino) + 1)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -452,3 +421,200 @@ def analisar_erros(
         if coluna_texto in df_val.columns:
             texto = str(df_val.iloc[i][coluna_texto])[:120]
         print(f"  Real: {real:<12} | Previsto: {previsto:<12} | Texto: {texto}...")
+
+
+# ==============================================================
+# AUXILIARES PARA AVALIACAO INTEGRADA (CLASSICOS + PROFUNDOS)
+# ==============================================================
+
+def registrar_resultado_modelo(
+    lista_resultados: list[dict],
+    mapa_predicoes: dict[str, np.ndarray],
+    mapa_y_verdadeiro: dict[str, np.ndarray],
+    nome_modelo: str,
+    y_verdadeiro,
+    y_predito,
+    familia: str,
+    protocolo_validacao: str,
+) -> dict:
+    """
+    Calcula metricas de um modelo, registra metadados de avaliacao e
+    armazena y_true/y_pred para analises posteriores (matriz, McNemar, erros).
+    """
+    y_true_arr = np.asarray(y_verdadeiro)
+    y_pred_arr = np.asarray(y_predito)
+    if y_true_arr.shape[0] != y_pred_arr.shape[0]:
+        raise ValueError(
+            f"Tamanhos incompativeis para '{nome_modelo}': "
+            f"y_true={y_true_arr.shape[0]} vs y_pred={y_pred_arr.shape[0]}."
+        )
+
+    metricas = calcular_metricas_classificacao(
+        y_true_arr,
+        y_pred_arr,
+        nome_modelo=nome_modelo,
+    )
+    metricas["familia"] = familia
+    metricas["protocolo_validacao"] = protocolo_validacao
+    metricas["n_amostras_validacao"] = int(y_true_arr.shape[0])
+
+    lista_resultados.append(metricas)
+    mapa_predicoes[nome_modelo] = y_pred_arr
+    mapa_y_verdadeiro[nome_modelo] = y_true_arr
+    return metricas
+
+
+def selecionar_top_modelos(
+    tabela_resultados: pd.DataFrame,
+    n: int = 2,
+    familia: str | None = None,
+    protocolo_validacao: str | None = None,
+) -> list[str]:
+    """
+    Seleciona os top-N modelos por F1-Macro (desempate por acuracia),
+    com filtros opcionais por familia e protocolo.
+    """
+    if tabela_resultados.empty:
+        return []
+
+    df = tabela_resultados.copy()
+    if "modelo" in df.columns:
+        df = df.set_index("modelo")
+
+    if familia is not None and "familia" in df.columns:
+        df = df[df["familia"] == familia]
+    if protocolo_validacao is not None and "protocolo_validacao" in df.columns:
+        df = df[df["protocolo_validacao"] == protocolo_validacao]
+
+    if df.empty:
+        return []
+
+    colunas_ord = [c for c in ["f1_macro", "accuracy"] if c in df.columns]
+    if not colunas_ord:
+        return df.index.tolist()[:n]
+    return df.sort_values(colunas_ord, ascending=False).head(n).index.tolist()
+
+
+def _resolver_dispositivo_torch(dispositivo: str | None = None):
+    import torch
+
+    if dispositivo is not None:
+        return torch.device(dispositivo)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def obter_probabilidades_bilstm(
+    modelo,
+    textos: Iterable[str],
+    vocabulario: dict[str, int],
+    dataset_inferencia_cls,
+    dataloader_cls,
+    comprimento_maximo: int = 500,
+    batch_size: int = 64,
+    dispositivo: str | None = None,
+) -> np.ndarray:
+    """
+    Retorna probabilidades (softmax) da BiLSTM para uma lista de textos.
+    dataset_inferencia_cls e dataloader_cls sao injetados do notebook.
+    """
+    import torch
+
+    dispositivo_torch = _resolver_dispositivo_torch(dispositivo)
+    dataset = dataset_inferencia_cls(list(textos), vocabulario, comprimento_maximo)
+    loader = dataloader_cls(dataset, batch_size=batch_size, shuffle=False)
+
+    modelo = modelo.to(dispositivo_torch)
+    modelo.eval()
+
+    probabilidades = []
+    with torch.no_grad():
+        for lote_x in loader:
+            logits = modelo(lote_x.to(dispositivo_torch))
+            probabilidades.extend(torch.softmax(logits, dim=1).cpu().numpy())
+    return np.asarray(probabilidades)
+
+
+def obter_probabilidades_legal_bert(
+    modelo,
+    tokenizer,
+    textos: Iterable[str],
+    dataset_bert_cls,
+    dataloader_cls,
+    max_len: int = 512,
+    batch_size: int = 32,
+    dispositivo: str | None = None,
+) -> np.ndarray:
+    """
+    Retorna probabilidades (softmax) do Legal-BERT para uma lista de textos.
+    dataset_bert_cls e dataloader_cls sao injetados do notebook.
+    """
+    import torch
+
+    dispositivo_torch = _resolver_dispositivo_torch(dispositivo)
+    dataset = dataset_bert_cls(list(textos), rotulos=None, tokenizer=tokenizer, max_len=max_len)
+    loader = dataloader_cls(dataset, batch_size=batch_size, shuffle=False)
+
+    modelo = modelo.to(dispositivo_torch)
+    modelo.eval()
+
+    probabilidades = []
+    with torch.no_grad():
+        for lote in loader:
+            b_ids = lote["input_ids"].to(dispositivo_torch)
+            b_mask = lote["attention_mask"].to(dispositivo_torch)
+            logits = modelo(input_ids=b_ids, attention_mask=b_mask).logits
+            probabilidades.extend(torch.softmax(logits, dim=1).cpu().numpy())
+    return np.asarray(probabilidades)
+
+
+def combinar_probabilidades(
+    probabilidades_a,
+    probabilidades_b,
+    peso_a: float = 0.5,
+) -> np.ndarray:
+    """
+    Combina duas matrizes de probabilidade via media ponderada.
+    """
+    probs_a = np.asarray(probabilidades_a)
+    probs_b = np.asarray(probabilidades_b)
+
+    if probs_a.shape != probs_b.shape:
+        raise ValueError(
+            "As matrizes de probabilidade precisam ter o mesmo shape: "
+            f"{probs_a.shape} vs {probs_b.shape}."
+        )
+    if not (0.0 <= peso_a <= 1.0):
+        raise ValueError("peso_a deve estar entre 0 e 1.")
+
+    return (probs_a * peso_a) + (probs_b * (1.0 - peso_a))
+
+
+def predizer_por_probabilidades(probabilidades) -> np.ndarray:
+    """Converte matriz de probabilidades em classes via argmax."""
+    probs = np.asarray(probabilidades)
+    if probs.ndim != 2:
+        raise ValueError("As probabilidades devem estar no formato 2D [n_amostras, n_classes].")
+    return np.argmax(probs, axis=1)
+
+
+def gerar_submissao(
+    ids,
+    predicoes,
+    nome_arquivo: str = "submission.csv",
+) -> pd.DataFrame:
+    """
+    Gera arquivo CSV no formato Kaggle: colunas Id e Category.
+    """
+    ids_arr = np.asarray(ids)
+    preds_arr = np.asarray(predicoes).astype(int)
+
+    if ids_arr.shape[0] != preds_arr.shape[0]:
+        raise ValueError(
+            "Quantidade de IDs e predicoes deve ser igual: "
+            f"ids={ids_arr.shape[0]} vs preds={preds_arr.shape[0]}"
+        )
+
+    df_sub = pd.DataFrame({"Id": ids_arr, "Category": preds_arr})
+    df_sub.to_csv(nome_arquivo, index=False)
+    print(f"Submissao salva em '{nome_arquivo}' com {len(df_sub):,} linhas.")
+    return df_sub
