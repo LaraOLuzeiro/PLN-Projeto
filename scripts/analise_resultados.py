@@ -347,7 +347,7 @@ def teste_mcnemar(
     """
     Teste de McNemar para comparacao estatistica entre dois classificadores.
     H0: os dois modelos nao diferem em suas probabilidades de erro.
-    Rejeita H0 (p < 0.05): diferenca estatisticamente significativa.
+    Rejeita H0 (p_valor < 0.05): diferenca estatisticamente significativa.
 
     b = casos em que modelo1 acerta e modelo2 erra
     c = casos em que modelo1 erra e modelo2 acerta

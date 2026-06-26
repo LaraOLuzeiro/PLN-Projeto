@@ -411,7 +411,7 @@ def executar_baselines_classicos(
     resultados = []
     artefatos: dict[str, ResultadoExperimento] = {}
 
-    # --- TF-IDF ---
+    # TF-IDF
     vet, X_tr_tfidf, X_vl_tfidf = vetorizar_tfidf(textos_treino, textos_validacao)
 
     # Naive Bayes requer valores nao-negativos (MaxAbsScaler mantem esparsidade)
@@ -450,7 +450,7 @@ def executar_baselines_classicos(
         )
         resultados.append(metricas)
 
-    # --- Word2Vec ---
+    #  Word2Vec 
     if _GENSIM_OK:
         modelo_w2v = treinar_word2vec(textos_treino)
         X_tr_w2v = vetorizar_word2vec_media(textos_treino, modelo_w2v)
